@@ -62,17 +62,17 @@
       margin-bottom: 10px;
     }
     .items-list {
-      font-size: 1.3rem;      /* 文字を大きくしました */
-      font-weight: bold;      /* 太字にして見やすくしました */
-      color: #222;            /* 文字色を少し濃くしました */
+      font-size: 1.3rem;
+      font-weight: bold;
+      color: #222;
       margin-bottom: 15px;
       text-align: left;
       background: #fff;
-      padding: 12px;          /* 余白を広げて窮屈さをなくしました */
+      padding: 12px;
       border-radius: 4px;
       border: 1px dashed #ccc;
       min-height: 40px;
-      line-height: 1.5;       /* 複数行になったときの行間を整えました */
+      line-height: 1.5;
     }
     .btn {
       padding: 12px;
@@ -99,15 +99,11 @@
   <div class="container">
     <div class="column">
       <h2 class="preparing-title">調理中</h2>
-      <div id="preparing-container" class="orders-grid">
-        <!-- 調理中のオーダーがここに入ります -->
-      </div>
+      <div id="preparing-container" class="orders-grid"></div>
     </div>
     <div class="column">
       <h2 class="ready-title">呼出中 (お受取口へ)</h2>
-      <div id="ready-container" class="orders-grid">
-        <!-- 呼出中のオーダーがここに入ります -->
-      </div>
+      <div id="ready-container" class="orders-grid"></div>
     </div>
   </div>
 
@@ -118,6 +114,9 @@
     const GAS_URL = 'https://script.google.com/macros/s/AKfycbwiPE1wSVaTV767nz1r31h3qNUiJWKwn8e53VtK5UH3lIuxm2FH30LyW4sObaFT4oQ0OQ/exec';
 
     let isInitialLoad = true; 
+    let lockedOrders = new Set(); // ★追加：操作直後のチラつき防止用ロック
+    let audioQueue = [];          // ★追加：音声の順番待ちリスト
+    let isPlayingAudio = false;   // ★追加：今、誰かが喋っているかどうかの判定
 
     function fetchOrders() {
       const script = document.createElement('script');
@@ -126,6 +125,10 @@
     }
 
     function updateStatus(receiptNumber, newStatus, btnElement) {
+      // ★チラつき防止：押した直後から8秒間は、このレシート番号に関するGASからの古いデータを無視する
+      lockedOrders.add(receiptNumber);
+      setTimeout(() => lockedOrders.delete(receiptNumber), 8000);
+
       const card = btnElement.closest('.card');
       
       if (newStatus === '呼出中') {
@@ -133,7 +136,9 @@
         btnElement.className = 'btn btn-done';
         btnElement.innerText = '受渡';
         btnElement.onclick = () => updateStatus(receiptNumber, '受渡完了', btnElement);
-        playCustomVoice(receiptNumber);
+        
+        // ★変更：音声を直接再生せず、一旦「順番待ちリスト」に並ばせる
+        enqueueVoice(receiptNumber);
       } else if (newStatus === '受渡完了') {
         card.remove(); 
       }
@@ -144,47 +149,72 @@
       document.body.appendChild(script);
     }
 
-    function updateCallback(response) {
-      // 画面は即時切り替え済みのため何もしない
-    }
+    function updateCallback(response) {}
 
     function renderOrders(orders) {
       const preparingContainer = document.getElementById('preparing-container');
       const readyContainer = document.getElementById('ready-container');
       
-      const existingCards = Array.from(document.querySelectorAll('.card')).map(card => card.dataset.receipt);
       let hasNewOrder = false;
+      const serverReceipts = orders.map(o => o.receiptNumber);
 
-      orders.forEach(order => {
-        if (existingCards.includes(order.receiptNumber)) return;
-
-        const card = document.createElement('div');
-        card.className = 'card';
-        card.dataset.receipt = order.receiptNumber;
+      // 1. すでに画面にあるカードの処理
+      document.querySelectorAll('.card').forEach(card => {
+        const rec = card.dataset.receipt;
         
-        const itemsHtml = order.items ? order.items.replace(/\n/g, '<br>') : '商品情報なし';
+        // ★さっき自分がボタンを押したばかりのカードなら、GASの遅延を無視してスルー
+        if (lockedOrders.has(rec)) return;
 
-        card.innerHTML = `
-          <div class="receipt-number">${order.receiptNumber}</div>
-          <div class="items-list">${itemsHtml}</div>
-        `;
+        if (!serverReceipts.includes(rec)) {
+          // サーバーから消えていたら画面からも消す
+          card.remove();
+        } else {
+          // サーバーと画面で状態が違う場合（別のタブレットで操作された場合など）は移動させる
+          const serverOrder = orders.find(o => o.receiptNumber === rec);
+          if (serverOrder.status === '呼出中' && card.parentElement === preparingContainer) {
+            readyContainer.appendChild(card);
+            const btn = card.querySelector('button');
+            btn.className = 'btn btn-done';
+            btn.innerText = '受渡';
+            btn.onclick = () => updateStatus(rec, '受渡完了', btn);
+          }
+        }
+      });
 
-        if (order.status === '調理中') {
-          const btn = document.createElement('button');
-          btn.className = 'btn btn-ready';
-          btn.innerText = '準備完了';
-          btn.onclick = () => updateStatus(order.receiptNumber, '呼出中', btn);
-          card.appendChild(btn);
-          preparingContainer.appendChild(card);
+      // 2. 新しいカードの追加処理
+      orders.forEach(order => {
+        if (lockedOrders.has(order.receiptNumber)) return;
+        
+        const exists = document.querySelector(`.card[data-receipt="${order.receiptNumber}"]`);
+        if (!exists) {
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.dataset.receipt = order.receiptNumber;
           
-          hasNewOrder = true;
-        } else if (order.status === '呼出中') {
-          const btn = document.createElement('button');
-          btn.className = 'btn btn-done';
-          btn.innerText = '受渡';
-          btn.onclick = () => updateStatus(order.receiptNumber, '受渡完了', btn);
-          card.appendChild(btn);
-          readyContainer.appendChild(card);
+          const itemsHtml = order.items ? order.items.replace(/\n/g, '<br>') : '商品情報なし';
+
+          card.innerHTML = `
+            <div class="receipt-number">${order.receiptNumber}</div>
+            <div class="items-list">${itemsHtml}</div>
+          `;
+
+          if (order.status === '調理中') {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-ready';
+            btn.innerText = '準備完了';
+            btn.onclick = () => updateStatus(order.receiptNumber, '呼出中', btn);
+            card.appendChild(btn);
+            preparingContainer.appendChild(card);
+            
+            hasNewOrder = true;
+          } else if (order.status === '呼出中') {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-done';
+            btn.innerText = '受渡';
+            btn.onclick = () => updateStatus(order.receiptNumber, '受渡完了', btn);
+            card.appendChild(btn);
+            readyContainer.appendChild(card);
+          }
         }
       });
 
@@ -196,42 +226,58 @@
       isInitialLoad = false; 
     }
 
+    // ==========================================
+    // ★追加：音声をキューに入れて順番に再生する仕組み
+    // ==========================================
+    function enqueueVoice(receiptNumber) {
+      audioQueue.push(receiptNumber); // リストの末尾に番号を追加
+      if (!isPlayingAudio) {
+        processAudioQueue(); // 今誰も喋っていなければ、すぐ再生スタート
+      }
+    }
+
+    async function processAudioQueue() {
+      // 順番待ちが0件になったら終了
+      if (audioQueue.length === 0) {
+        isPlayingAudio = false;
+        return;
+      }
+      
+      isPlayingAudio = true;
+      const receiptNumber = audioQueue.shift(); // 順番待ちの先頭を取り出す
+      
+      await playCustomVoice(receiptNumber); // その番号の音声を再生
+      
+      // 次の音声が被らないよう、1秒（1000ms）間隔をあけてから次の人の音声を再生
+      setTimeout(processAudioQueue, 1000);
+    }
+
     async function playCustomVoice(receiptNumber) {
       const playAudio = (fileName) => {
         return new Promise((resolve) => {
           const audio = new Audio('./audio/' + fileName);
           audio.onended = resolve;
-          audio.onerror = resolve; // ファイルが無い等のエラー時も次へ
+          audio.onerror = resolve;
           audio.play().catch(resolve);
         });
       };
 
       try {
-        // ① 冒頭：「レシート番号」
         await playAudio('prefix.mp3');
-
-        // ② 1文字ずつ順番にチェックして再生する
         for (let i = 0; i < receiptNumber.length; i++) {
           const char = receiptNumber[i];
-          
           if (/[0-9]/.test(char)) {
-            // もし文字が「0〜9の数字」なら、その数字の音声を再生
             await playAudio(char + '.mp3');
           } else if (char === '-') {
-            // もし文字が「ハイフン」なら、の（hyphen.mp3）を再生
             await playAudio('hyphen.mp3');
           }
-          // 「#」など、それ以外の記号は無視してスキップします
         }
-
-        // ③ 末尾：「番のお客様、受渡口まで〜」
         await playAudio('suffix.mp3');
       } catch (e) {
         console.error("音声再生エラー", e);
       }
     }
 
-    // ★800ミリ秒ごとに確認（エラーや制限がかかった場合は数値を少し大きくしてください）
     setInterval(fetchOrders, 800);
     window.onload = fetchOrders;
   </script>
