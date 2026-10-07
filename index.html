@@ -62,17 +62,17 @@
       margin-bottom: 10px;
     }
     .items-list {
-      font-size: 1.3rem;      /* ← 0.9remから大きくしました（数字でお好みのサイズに調整してください） */
-      font-weight: bold;      /* ← さらに見やすくするために太字を追加しました */
-      color: #222;            /* ← 文字色も少し濃く、はっきりさせています */
+      font-size: 1.3rem;      /* 文字を大きくしました */
+      font-weight: bold;      /* 太字にして見やすくしました */
+      color: #222;            /* 文字色を少し濃くしました */
       margin-bottom: 15px;
       text-align: left;
       background: #fff;
-      padding: 12px;          /* ← 文字が大きくなった分、枠内の余白も少し広げました */
+      padding: 12px;          /* 余白を広げて窮屈さをなくしました */
       border-radius: 4px;
       border: 1px dashed #ccc;
       min-height: 40px;
-      line-height: 1.5;       /* ← 複数商品のときに行間が詰まらないようにしました */
+      line-height: 1.5;       /* 複数行になったときの行間を整えました */
     }
     .btn {
       padding: 12px;
@@ -201,23 +201,37 @@
         return new Promise((resolve) => {
           const audio = new Audio('./audio/' + fileName);
           audio.onended = resolve;
-          audio.onerror = resolve;
+          audio.onerror = resolve; // ファイルが無い等のエラー時も次へ
           audio.play().catch(resolve);
         });
       };
 
       try {
+        // ① 冒頭：「レシート番号」
         await playAudio('prefix.mp3');
-        const digits = receiptNumber.replace(/\D/g, ''); 
-        for (let i = 0; i < digits.length; i++) {
-          await playAudio(digits[i] + '.mp3');
+
+        // ② 1文字ずつ順番にチェックして再生する
+        for (let i = 0; i < receiptNumber.length; i++) {
+          const char = receiptNumber[i];
+          
+          if (/[0-9]/.test(char)) {
+            // もし文字が「0〜9の数字」なら、その数字の音声を再生
+            await playAudio(char + '.mp3');
+          } else if (char === '-') {
+            // もし文字が「ハイフン」なら、の（hyphen.mp3）を再生
+            await playAudio('hyphen.mp3');
+          }
+          // 「#」など、それ以外の記号は無視してスキップします
         }
+
+        // ③ 末尾：「番のお客様、受渡口まで〜」
         await playAudio('suffix.mp3');
       } catch (e) {
         console.error("音声再生エラー", e);
       }
     }
 
+    // ★800ミリ秒ごとに確認（エラーや制限がかかった場合は数値を少し大きくしてください）
     setInterval(fetchOrders, 800);
     window.onload = fetchOrders;
   </script>
