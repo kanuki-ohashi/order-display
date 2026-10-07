@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>オーダー呼出ディスプレイ</title>
+  <style>
+    body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f7f6; padding: 20px; }
+    h1 { text-align: center; color: #333; margin-bottom: 30px; }
+    .container { display: flex; flex-wrap: wrap; gap: 20px; justify-content: center; }
+    .card { background: #fff; padding: 25px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); text-align: center; width: 220px; }
+    .receipt-label { font-size: 0.9em; color: #777; }
+    .receipt-number { font-size: 2.5em; font-weight: bold; margin: 10px 0; color: #222; }
+    .status { font-size: 1.2em; margin-bottom: 20px; font-weight: bold; padding: 5px; border-radius: 4px;}
+    .status.cooking { background: #fff3cd; color: #856404; }
+    .status.calling { background: #d4edda; color: #155724; animation: blink 1s infinite alternate; }
+    button { padding: 12px 24px; font-size: 1.1em; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; width: 100%; transition: 0.2s; color: white; }
+    .btn-ready { background: #007bff; }
+    .btn-ready:hover { background: #0056b3; }
+    .btn-handover { background: #28a745; }
+    .btn-handover:hover { background: #1e7e34; }
+    #debug-log { max-width: 600px; margin: 20px auto; padding: 10px; background: #ffe6e6; color: #d8000c; border-radius: 5px; display: none; font-weight: bold; text-align: center; }
+    @keyframes blink { from { opacity: 1; } to { opacity: 0.7; } }
+  </style>
+</head>
+<body>
+  <h1>オーダー呼出ディスプレイ</h1>
+  <div id="debug-log"></div>
+  <div id="app" class="container">読み込み中...</div>
+
+  <script>
+    // ==========================================
+    // ★ここにGASのウェブアプリURLを貼り付けてください
+    // ==========================================
+    const GAS_URL = "https://script.google.com/macros/s/AKfycbwiPE1wSVaTV767nz1r31h3qNUiJWKwn8e53VtK5UH3lIuxm2FH30LyW4sObaFT4oQ0OQ/exec";
+
+    // 画面にエラーを出すための関数
+    function showError(message) {
+      const log = document.getElementById('debug-log');
+      log.style.display = 'block';
+      log.innerText = message;
+      document.getElementById('app').innerHTML = '';
+    }
+
+    // JSONP通信（タイムアウトとエラー検知を追加）
+    function sendJsonp(params = {}) {
+      return new Promise((resolve, reject) => {
+        if (!GAS_URL.startsWith("https://script.google.com/")) {
+          reject(new Error("GASのURLが正しく設定されていません。"));
+          return;
+        }
+
+        const callbackName = 'jsonp_' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+        
+        // 成功時の処理
+        window[callbackName] = function(data) {
+          resolve(data);
+          cleanup();
+        };
+        
+        let url = GAS_URL + '?callback=' + callbackName;
+        for (let key in params) {
+          url += '&' + key + '=' + encodeURIComponent(params[key]);
+        }
+        
+        const script = document.createElement('script');
+        script.src = url;
+        
+        // 通信失敗時の処理
+        script.onerror = function() {
+          reject(new Error("通信がブロックされました。GASのアクセス権限が「全員」になっているか確認してください。"));
+          cleanup();
+        };
+
+        document.body.appendChild(script);
+
+        // 10秒応答がなければタイムアウト
+        const timer = setTimeout(() => {
+          if (window[callbackName]) {
+            reject(new Error("GASからの応答がありません。「新バージョン」として再デプロイされているか確認してください。"));
+            cleanup();
+          }
+        }, 10000);
+
+        function cleanup() {
+          clearTimeout(timer);
+          delete window[callbackName];
+          if (script.parentNode) script.parentNode.removeChild(script);
+        }
+      });
+    }
+
+    function fetchOrders() {
+      document.getElementById('debug-log').style.display = 'none'; // エラー表示をクリア
+      sendJsonp()
+        .then(orders => render(orders))
+        .catch(error => showError(error.message));
+    }
+
+    function updateStatus(receiptNumber, newStatus) {
+      sendJsonp({
+        action: 'update_status',
+        receiptNumber: receiptNumber,
+        status: newStatus
+      })
+      .then(orders => render(orders))
+      .catch(error => showError("ステータス更新失敗: " + error.message));
+    }
+
+    function callAudio(receiptNumber) {
+      const msg = new SpeechSynthesisUtterance();
+      msg.text = `レシート番号、${receiptNumber}番でお待ちのお客様、お待たせいたしました。受渡口までお越しください。`;
+      msg.lang = 'ja-JP';
+      msg.rate = 0.9;
+      window.speechSynthesis.speak(msg);
+    }
+
+    function onReadyClick(receiptNumber) {
+      callAudio(receiptNumber);
+      updateStatus(receiptNumber, '呼出中');
+    }
+
+    function onHandoverClick(receiptNumber) {
+      updateStatus(receiptNumber, '受渡完了');
+    }
+
+    function render(orders) {
+      const app = document.getElementById('app');
+      app.innerHTML = '';
+      
+      if(!orders || orders.length === 0) {
+        app.innerHTML = '<p style="color:#777; font-size:1.2em;">現在待機中のオーダーはありません。</p>';
+        return;
+      }
+      
+      orders.forEach(order => {
+        const card = document.createElement('div');
+        card.className = 'card';
+        
+        card.innerHTML = `
+          <div class="receipt-label">レシート番号</div>
+          <div class="receipt-number">${order.receiptNumber}</div>
+          <div class="status ${order.status === '調理中' ? 'cooking' : 'calling'}">${order.status}</div>
+        `;
+
+        const btn = document.createElement('button');
+        if (order.status === '調理中') {
+          btn.className = 'btn-ready';
+          btn.innerText = '準備完了';
+          btn.onclick = () => onReadyClick(order.receiptNumber);
+        } else {
+          btn.className = 'btn-handover';
+          btn.innerText = '受渡';
+          btn.onclick = () => onHandoverClick(order.receiptNumber);
+        }
+        card.appendChild(btn);
+        app.appendChild(card);
+      });
+    }
+
+    // 3秒ごとに最新リストを自動取得
+    setInterval(fetchOrders, 3000);
+    window.onload = fetchOrders;
+  </script>
+</body>
+</html>
