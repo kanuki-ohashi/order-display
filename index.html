@@ -108,116 +108,118 @@
       </div>
     </div>
   </div>
+// ==========================================
+// ★ここを最新のGASウェブアプリURLに書き換えてください★
+// ==========================================
+const GAS_URL = 'ここにGASのURLを貼り付けてください';
 
-  <script>
-    // ==========================================
-    // ★ここを最新のGASウェブアプリURLに書き換えてください★
-    // ==========================================
-    const GAS_URL = 'https://script.google.com/macros/s/AKfycbwiPE1wSVaTV767nz1r31h3qNUiJWKwn8e53VtK5UH3lIuxm2FH30LyW4sObaFT4oQ0OQ/exec';
+// ★追加：ページを開いた直後かどうかの判定
+let isInitialLoad = true; 
 
-    // 画面初期化・定期更新用
-    function fetchOrders() {
-      const script = document.createElement('script');
-      script.src = `${GAS_URL}?callback=renderOrders&t=${new Date().getTime()}`;
-      document.body.appendChild(script);
-    }
+function fetchOrders() {
+  const script = document.createElement('script');
+  script.src = `${GAS_URL}?callback=renderOrders&t=${new Date().getTime()}`;
+  document.body.appendChild(script);
+}
 
-    // ステータスを更新してスプレッドシートへ送信
-    function updateStatus(receiptNumber, newStatus, btnElement) {
-      // 連打防止のためボタンを無効化
-      btnElement.disabled = true;
-      btnElement.innerText = "処理中...";
+function updateStatus(receiptNumber, newStatus, btnElement) {
+  const card = btnElement.closest('.card');
+  
+  if (newStatus === '呼出中') {
+    document.getElementById('ready-container').appendChild(card);
+    btnElement.className = 'btn btn-done';
+    btnElement.innerText = '受渡';
+    btnElement.onclick = () => updateStatus(receiptNumber, '受渡完了', btnElement);
+    playCustomVoice(receiptNumber);
+  } else if (newStatus === '受渡完了') {
+    card.remove(); 
+  }
 
-      const url = `${GAS_URL}?action=update_status&receiptNumber=${encodeURIComponent(receiptNumber)}&status=${encodeURIComponent(newStatus)}&callback=updateCallback`;
-      const script = document.createElement('script');
-      script.src = url;
-      document.body.appendChild(script);
-      
-      // 呼出中に切り替えた場合のみ、音声を再生する
-      if(newStatus === '呼出中') {
-         playCustomVoice(receiptNumber);
-      }
-    }
+  const url = `${GAS_URL}?action=update_status&receiptNumber=${encodeURIComponent(receiptNumber)}&status=${encodeURIComponent(newStatus)}&callback=updateCallback`;
+  const script = document.createElement('script');
+  script.src = url;
+  document.body.appendChild(script);
+}
 
-    // GASからの更新完了通知を受け取るコールバック
-    function updateCallback(response) {
-      fetchOrders(); // 画面を最新状態にリロード
-    }
+function updateCallback(response) {
+}
 
-    // 画面にオーダーカードを描画する
-    function renderOrders(orders) {
-      const preparingContainer = document.getElementById('preparing-container');
-      const readyContainer = document.getElementById('ready-container');
-      
-      preparingContainer.innerHTML = '';
-      readyContainer.innerHTML = '';
+function renderOrders(orders) {
+  const preparingContainer = document.getElementById('preparing-container');
+  const readyContainer = document.getElementById('ready-container');
+  
+  const existingCards = Array.from(document.querySelectorAll('.card')).map(card => card.dataset.receipt);
+  
+  // ★追加：新しいオーダーが来たかどうかのフラグ
+  let hasNewOrder = false;
 
-      orders.forEach(order => {
-        const card = document.createElement('div');
-        card.className = 'card';
-        
-        // GASから来た改行(\n)をHTMLの<br>に変換
-        const itemsHtml = order.items ? order.items.replace(/\n/g, '<br>') : '商品情報なし';
+  orders.forEach(order => {
+    if (existingCards.includes(order.receiptNumber)) return;
 
-        card.innerHTML = `
-          <div class="receipt-number">${order.receiptNumber}</div>
-          <div class="items-list">${itemsHtml}</div>
-        `;
-
-        if (order.status === '調理中') {
-          const btn = document.createElement('button');
-          btn.className = 'btn btn-ready';
-          btn.innerText = '準備完了';
-          btn.onclick = () => updateStatus(order.receiptNumber, '呼出中', btn);
-          card.appendChild(btn);
-          preparingContainer.appendChild(card);
-        } else if (order.status === '呼出中') {
-          const btn = document.createElement('button');
-          btn.className = 'btn btn-done';
-          btn.innerText = '受渡';
-          btn.onclick = () => updateStatus(order.receiptNumber, '受渡完了', btn);
-          card.appendChild(btn);
-          readyContainer.appendChild(card);
-        }
-      });
-    }
-
-    // ==========================================
-    // ★自作音声の順番再生ロジック★
-    // ==========================================
-    async function playCustomVoice(receiptNumber) {
-      const playAudio = (fileName) => {
-        return new Promise((resolve) => {
-          // index.htmlと同じ階層の audio フォルダから読み込む
-          const audio = new Audio('./audio/' + fileName);
-          audio.onended = resolve;       // 再生が終わったら次へ
-          audio.onerror = resolve;       // ファイルが無い等のエラー時も次へスキップ
-          audio.play().catch(resolve);   // ブラウザの自動再生ブロック時も止まらず次へ
-        });
-      };
-
-      try {
-        // ① 冒頭：「レシート番号」
-        await playAudio('prefix.mp3');
-
-        // ② 番号：「#1-0012」などの記号を消して数字「10012」だけを抽出し、1文字ずつ再生
-        const digits = receiptNumber.replace(/\D/g, ''); 
-        for (let i = 0; i < digits.length; i++) {
-          await playAudio(digits[i] + '.mp3');
-        }
-
-        // ③ 末尾：「番のお客様、受渡口まで〜」
-        await playAudio('suffix.mp3');
-      } catch (e) {
-        console.error("音声再生エラー", e);
-      }
-    }
-
-    // 10秒ごとにGASに最新情報を問い合わせる（自動更新）
-    setInterval(fetchOrders, 10000);
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.receipt = order.receiptNumber;
     
-    // ページを開いた瞬間に1回目の読み込みを実行
-    window.onload = fetchOrders;
-  </script>
+    const itemsHtml = order.items ? order.items.replace(/\n/g, '<br>') : '商品情報なし';
+
+    card.innerHTML = `
+      <div class="receipt-number">${order.receiptNumber}</div>
+      <div class="items-list">${itemsHtml}</div>
+    `;
+
+    if (order.status === '調理中') {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-ready';
+      btn.innerText = '準備完了';
+      btn.onclick = () => updateStatus(order.receiptNumber, '呼出中', btn);
+      card.appendChild(btn);
+      preparingContainer.appendChild(card);
+      
+      hasNewOrder = true; // ★新規オーダーありと判定
+    } else if (order.status === '呼出中') {
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-done';
+      btn.innerText = '受渡';
+      btn.onclick = () => updateStatus(order.receiptNumber, '受渡完了', btn);
+      card.appendChild(btn);
+      readyContainer.appendChild(card);
+    }
+  });
+
+  // ★追加：初回読み込み時ではなく、新規オーダーがあった場合のみ通知音を鳴らす
+  if (!isInitialLoad && hasNewOrder) {
+    const notifyAudio = new Audio('./audio/notify.mp3');
+    notifyAudio.play().catch(e => console.error("通知音再生エラー", e));
+  }
+  
+  // ★追加：初回の読み込み処理が終わったことを記録
+  isInitialLoad = false; 
+}
+
+async function playCustomVoice(receiptNumber) {
+  const playAudio = (fileName) => {
+    return new Promise((resolve) => {
+      const audio = new Audio('./audio/' + fileName);
+      audio.onended = resolve;
+      audio.onerror = resolve;
+      audio.play().catch(resolve);
+    });
+  };
+
+  try {
+    await playAudio('prefix.mp3');
+    const digits = receiptNumber.replace(/\D/g, ''); 
+    for (let i = 0; i < digits.length; i++) {
+      await playAudio(digits[i] + '.mp3');
+    }
+    await playAudio('suffix.mp3');
+  } catch (e) {
+    console.error("音声再生エラー", e);
+  }
+}
+
+setInterval(fetchOrders, 3000);
+window.onload = fetchOrders;
+  
 </body>
 </html>
