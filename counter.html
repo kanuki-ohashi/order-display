@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>オーダー呼出システム（超速版）</title>
+  <!-- ★Firebaseを利用するための準備ファイル -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+
+  <style>
+    body {
+      font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
+      background-color: #f4f7f6;
+      margin: 0;
+      padding: 20px;
+      color: #333;
+    }
+    h1 {
+      text-align: center;
+      color: #2c3e50;
+      margin-bottom: 30px;
+    }
+    .container {
+      display: flex;
+      gap: 20px;
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .column {
+      flex: 1;
+      background: #fff;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .column h2 {
+      text-align: center;
+      padding-bottom: 10px;
+      border-bottom: 3px solid #eee;
+      margin-top: 0;
+    }
+    .preparing-title { color: #e67e22; border-bottom-color: #e67e22 !important; }
+    .ready-title { color: #27ae60; border-bottom-color: #27ae60 !important; }
+    
+    .orders-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 15px;
+      margin-top: 20px;
+    }
+    .card {
+      background: #fafafa;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 15px;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .receipt-number {
+      font-size: 1.8rem;
+      font-weight: bold;
+      color: #2c3e50;
+      margin-bottom: 10px;
+    }
+    .items-list {
+      font-size: 1.3rem;
+      font-weight: bold;
+      color: #222;
+      margin-bottom: 15px;
+      text-align: left;
+      background: #fff;
+      padding: 12px;
+      border-radius: 4px;
+      border: 1px dashed #ccc;
+      min-height: 40px;
+      line-height: 1.5;
+    }
+    .btn {
+      padding: 12px;
+      border: none;
+      border-radius: 6px;
+      font-size: 1rem;
+      font-weight: bold;
+      cursor: pointer;
+      transition: opacity 0.2s;
+      color: #fff;
+      width: 100%;
+    }
+    .btn:active { opacity: 0.7; }
+    .btn-ready { background-color: #e67e22; }
+    .btn-done { background-color: #27ae60; }
+  </style>
+</head>
+<body>
+
+  <h1>オーダー状況</h1>
+  
+  <div class="container">
+    <div class="column">
+      <h2 class="preparing-title">調理中</h2>
+      <div id="preparing-container" class="orders-grid"></div>
+    </div>
+    <div class="column">
+      <h2 class="ready-title">呼出中 (お受取口へ)</h2>
+      <div id="ready-container" class="orders-grid"></div>
+    </div>
+  </div>
+
+  <script>
+    // ==========================================
+    // ★Firebaseの接続設定
+    // ==========================================
+    const firebaseConfig = {
+      databaseURL: "https://order-system-6a1e2-default-rtdb.firebaseio.com/"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+    const ordersRef = db.ref('orders');
+    const archiveRef = db.ref('archive');
+
+    let isInitialLoad = true; 
+    let audioQueue = [];
+    let isPlayingAudio = false;
+
+    // ★Firebaseから「データが変わったよ！」とプッシュ通知が来るたびに自動実行される
+    ordersRef.on('value', (snapshot) => {
+      const data = snapshot.val();
+      const orders = [];
+      
+      // データを配列に変換
+      for (let key in data) {
+        orders.push(data[key]);
+      }
+      // 追加された時間順に並び替え
+      orders.sort((a, b) => a.timestamp - b.timestamp);
+      
+      renderOrders(orders);
+    });
+
+    function updateStatus(receiptNumber, newStatus, btnElement) {
+      // 画面の見た目だけ一瞬で変える（チラつき防止用）
+      const card = btnElement.closest('.card');
+      
+      if (newStatus === '呼出中') {
+        document.getElementById('ready-container').appendChild(card);
+        btnElement.className = 'btn btn-done';
+        btnElement.innerText = '受渡';
+        btnElement.onclick = () => updateStatus(receiptNumber, '受渡完了', btnElement);
+        enqueueVoice(receiptNumber);
+        
+        // Firebase側のステータスを更新
+        ordersRef.child(receiptNumber).update({ status: '呼出中' });
+        
+      } else if (newStatus === '受渡完了') {
+        card.remove(); 
+        
+        // Firebaseの「orders」から「archive」へお引越し（ゾンビ対策）
+        ordersRef.child(receiptNumber).once('value').then(snap => {
+          const val = snap.val();
+          if(val) {
+            val.status = '受渡完了';
+            archiveRef.child(receiptNumber).set(val).then(() => {
+              ordersRef.child(receiptNumber).remove(); // ordersから削除
+            });
+          }
+        });
+      }
+    }
+
+    function renderOrders(orders) {
+      const preparingContainer = document.getElementById('preparing-container');
+      const readyContainer = document.getElementById('ready-container');
+      
+      const existingCards = Array.from(document.querySelectorAll('.card')).map(card => card.dataset.receipt);
+      const serverReceipts = orders.map(o => o.receiptNumber);
+      let hasNewOrder = false;
+
+      // 消えたオーダーを画面から消す
+      document.querySelectorAll('.card').forEach(card => {
+        if (!serverReceipts.includes(card.dataset.receipt)) {
+          card.remove();
+        }
+      });
+
+      orders.forEach(order => {
+        let card = document.querySelector(`.card[data-receipt="${order.receiptNumber}"]`);
+        
+        if (!card) {
+          card = document.createElement('div');
+          card.className = 'card';
+          card.dataset.receipt = order.receiptNumber;
+          
+          const itemsHtml = order.items ? order.items.replace(/\n/g, '<br>') : '商品情報なし';
+
+          card.innerHTML = `
+            <div class="receipt-number">${order.receiptNumber}</div>
+            <div class="items-list">${itemsHtml}</div>
+          `;
+
+          if (order.status === '調理中') {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-ready';
+            btn.innerText = '準備完了';
+            btn.onclick = () => updateStatus(order.receiptNumber, '呼出中', btn);
+            card.appendChild(btn);
+            preparingContainer.appendChild(card);
+            
+            hasNewOrder = true;
+          } else if (order.status === '呼出中') {
+            const btn = document.createElement('button');
+            btn.className = 'btn btn-done';
+            btn.innerText = '受渡';
+            btn.onclick = () => updateStatus(order.receiptNumber, '受渡完了', btn);
+            card.appendChild(btn);
+            readyContainer.appendChild(card);
+          }
+        } else {
+          // すでにあるカードで、ステータスが変わっていたら移動させる（他のタブレット操作の同期用）
+          if (order.status === '呼出中' && card.parentElement === preparingContainer) {
+            readyContainer.appendChild(card);
+            const btn = card.querySelector('button');
+            btn.className = 'btn btn-done';
+            btn.innerText = '受渡';
+            btn.onclick = () => updateStatus(order.receiptNumber, '受渡完了', btn);
+          }
+        }
+      });
+
+      // 初回読み込み完了後に新規が来たら音を鳴らす
+      if (!isInitialLoad && hasNewOrder) {
+        const notifyAudio = new Audio('./audio/notify.mp3');
+        notifyAudio.play().catch(e => console.error("通知音再生エラー", e));
+      }
+      
+      // 最初は少し待ってから「初期ロード完了」とする（Firebaseからの最初のデータ受信を待つため）
+      setTimeout(() => { isInitialLoad = false; }, 1000);
+    }
+
+    function enqueueVoice(receiptNumber) {
+      audioQueue.push(receiptNumber);
+      if (!isPlayingAudio) processAudioQueue();
+    }
+
+    async function processAudioQueue() {
+      if (audioQueue.length === 0) {
+        isPlayingAudio = false;
+        return;
+      }
+      isPlayingAudio = true;
+      const receiptNumber = audioQueue.shift();
+      await playCustomVoice(receiptNumber);
+      setTimeout(processAudioQueue, 1000);
+    }
+
+    async function playCustomVoice(receiptNumber) {
+      const playAudio = (fileName) => {
+        return new Promise((resolve) => {
+          const audio = new Audio('./audio/' + fileName);
+          audio.onended = resolve;
+          audio.onerror = resolve; 
+          audio.play().catch(resolve);
+        });
+      };
+
+      try {
+        await playAudio('prefix.mp3');
+        for (let i = 0; i < receiptNumber.length; i++) {
+          const char = receiptNumber[i];
+          if (/[0-9]/.test(char)) {
+            await playAudio(char + '.mp3');
+          } else if (char === '-') {
+            await playAudio('hyphen.mp3');
+          }
+        }
+        await playAudio('suffix.mp3');
+      } catch (e) {
+        console.error("音声再生エラー", e);
+      }
+    }
+  </script>
+</body>
+</html>
