@@ -3,7 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>オーダー呼出システム</title>
+  <title>オーダー呼出システム（超速版）</title>
+  <!-- ★Firebaseを利用するための準備ファイル -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+
   <style>
     body {
       font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
@@ -86,8 +90,6 @@
       width: 100%;
     }
     .btn:active { opacity: 0.7; }
-    .btn:disabled { background: #95a5a6; cursor: not-allowed; }
-    
     .btn-ready { background-color: #e67e22; }
     .btn-done { background-color: #27ae60; }
   </style>
@@ -109,26 +111,37 @@
 
   <script>
     // ==========================================
-    // ★ここを最新のGASウェブアプリURLに書き換えてください★
+    // ★Firebaseの接続設定
     // ==========================================
-    const GAS_URL = 'https://script.google.com/macros/s/AKfycbwiPE1wSVaTV767nz1r31h3qNUiJWKwn8e53VtK5UH3lIuxm2FH30LyW4sObaFT4oQ0OQ/exec';
+    const firebaseConfig = {
+      databaseURL: "https://order-system-6a1e2-default-rtdb.firebaseio.com/"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+    const ordersRef = db.ref('orders');
+    const archiveRef = db.ref('archive');
 
     let isInitialLoad = true; 
-    let lockedOrders = new Set(); // ★追加：操作直後のチラつき防止用ロック
-    let audioQueue = [];          // ★追加：音声の順番待ちリスト
-    let isPlayingAudio = false;   // ★追加：今、誰かが喋っているかどうかの判定
+    let audioQueue = [];
+    let isPlayingAudio = false;
 
-    function fetchOrders() {
-      const script = document.createElement('script');
-      script.src = `${GAS_URL}?callback=renderOrders&t=${new Date().getTime()}`;
-      document.body.appendChild(script);
-    }
+    // ★Firebaseから「データが変わったよ！」とプッシュ通知が来るたびに自動実行される
+    ordersRef.on('value', (snapshot) => {
+      const data = snapshot.val();
+      const orders = [];
+      
+      // データを配列に変換
+      for (let key in data) {
+        orders.push(data[key]);
+      }
+      // 追加された時間順に並び替え
+      orders.sort((a, b) => a.timestamp - b.timestamp);
+      
+      renderOrders(orders);
+    });
 
     function updateStatus(receiptNumber, newStatus, btnElement) {
-      // ★チラつき防止：押した直後から8秒間は、このレシート番号に関するGASからの古いデータを無視する
-      lockedOrders.add(receiptNumber);
-      setTimeout(() => lockedOrders.delete(receiptNumber), 8000);
-
+      // 画面の見た目だけ一瞬で変える（チラつき防止用）
       const card = btnElement.closest('.card');
       
       if (newStatus === '呼出中') {
@@ -136,58 +149,47 @@
         btnElement.className = 'btn btn-done';
         btnElement.innerText = '受渡';
         btnElement.onclick = () => updateStatus(receiptNumber, '受渡完了', btnElement);
-        
-        // ★変更：音声を直接再生せず、一旦「順番待ちリスト」に並ばせる
         enqueueVoice(receiptNumber);
+        
+        // Firebase側のステータスを更新
+        ordersRef.child(receiptNumber).update({ status: '呼出中' });
+        
       } else if (newStatus === '受渡完了') {
         card.remove(); 
+        
+        // Firebaseの「orders」から「archive」へお引越し（ゾンビ対策）
+        ordersRef.child(receiptNumber).once('value').then(snap => {
+          const val = snap.val();
+          if(val) {
+            val.status = '受渡完了';
+            archiveRef.child(receiptNumber).set(val).then(() => {
+              ordersRef.child(receiptNumber).remove(); // ordersから削除
+            });
+          }
+        });
       }
-
-      const url = `${GAS_URL}?action=update_status&receiptNumber=${encodeURIComponent(receiptNumber)}&status=${encodeURIComponent(newStatus)}&callback=updateCallback`;
-      const script = document.createElement('script');
-      script.src = url;
-      document.body.appendChild(script);
     }
-
-    function updateCallback(response) {}
 
     function renderOrders(orders) {
       const preparingContainer = document.getElementById('preparing-container');
       const readyContainer = document.getElementById('ready-container');
       
-      let hasNewOrder = false;
+      const existingCards = Array.from(document.querySelectorAll('.card')).map(card => card.dataset.receipt);
       const serverReceipts = orders.map(o => o.receiptNumber);
+      let hasNewOrder = false;
 
-      // 1. すでに画面にあるカードの処理
+      // 消えたオーダーを画面から消す
       document.querySelectorAll('.card').forEach(card => {
-        const rec = card.dataset.receipt;
-        
-        // ★さっき自分がボタンを押したばかりのカードなら、GASの遅延を無視してスルー
-        if (lockedOrders.has(rec)) return;
-
-        if (!serverReceipts.includes(rec)) {
-          // サーバーから消えていたら画面からも消す
+        if (!serverReceipts.includes(card.dataset.receipt)) {
           card.remove();
-        } else {
-          // サーバーと画面で状態が違う場合（別のタブレットで操作された場合など）は移動させる
-          const serverOrder = orders.find(o => o.receiptNumber === rec);
-          if (serverOrder.status === '呼出中' && card.parentElement === preparingContainer) {
-            readyContainer.appendChild(card);
-            const btn = card.querySelector('button');
-            btn.className = 'btn btn-done';
-            btn.innerText = '受渡';
-            btn.onclick = () => updateStatus(rec, '受渡完了', btn);
-          }
         }
       });
 
-      // 2. 新しいカードの追加処理
       orders.forEach(order => {
-        if (lockedOrders.has(order.receiptNumber)) return;
+        let card = document.querySelector(`.card[data-receipt="${order.receiptNumber}"]`);
         
-        const exists = document.querySelector(`.card[data-receipt="${order.receiptNumber}"]`);
-        if (!exists) {
-          const card = document.createElement('div');
+        if (!card) {
+          card = document.createElement('div');
           card.className = 'card';
           card.dataset.receipt = order.receiptNumber;
           
@@ -215,40 +217,41 @@
             card.appendChild(btn);
             readyContainer.appendChild(card);
           }
+        } else {
+          // すでにあるカードで、ステータスが変わっていたら移動させる（他のタブレット操作の同期用）
+          if (order.status === '呼出中' && card.parentElement === preparingContainer) {
+            readyContainer.appendChild(card);
+            const btn = card.querySelector('button');
+            btn.className = 'btn btn-done';
+            btn.innerText = '受渡';
+            btn.onclick = () => updateStatus(order.receiptNumber, '受渡完了', btn);
+          }
         }
       });
 
+      // 初回読み込み完了後に新規が来たら音を鳴らす
       if (!isInitialLoad && hasNewOrder) {
         const notifyAudio = new Audio('./audio/notify.mp3');
         notifyAudio.play().catch(e => console.error("通知音再生エラー", e));
       }
       
-      isInitialLoad = false; 
+      // 最初は少し待ってから「初期ロード完了」とする（Firebaseからの最初のデータ受信を待つため）
+      setTimeout(() => { isInitialLoad = false; }, 1000);
     }
 
-    // ==========================================
-    // ★追加：音声をキューに入れて順番に再生する仕組み
-    // ==========================================
     function enqueueVoice(receiptNumber) {
-      audioQueue.push(receiptNumber); // リストの末尾に番号を追加
-      if (!isPlayingAudio) {
-        processAudioQueue(); // 今誰も喋っていなければ、すぐ再生スタート
-      }
+      audioQueue.push(receiptNumber);
+      if (!isPlayingAudio) processAudioQueue();
     }
 
     async function processAudioQueue() {
-      // 順番待ちが0件になったら終了
       if (audioQueue.length === 0) {
         isPlayingAudio = false;
         return;
       }
-      
       isPlayingAudio = true;
-      const receiptNumber = audioQueue.shift(); // 順番待ちの先頭を取り出す
-      
-      await playCustomVoice(receiptNumber); // その番号の音声を再生
-      
-      // 次の音声が被らないよう、1秒（1000ms）間隔をあけてから次の人の音声を再生
+      const receiptNumber = audioQueue.shift();
+      await playCustomVoice(receiptNumber);
       setTimeout(processAudioQueue, 1000);
     }
 
@@ -257,7 +260,7 @@
         return new Promise((resolve) => {
           const audio = new Audio('./audio/' + fileName);
           audio.onended = resolve;
-          audio.onerror = resolve;
+          audio.onerror = resolve; 
           audio.play().catch(resolve);
         });
       };
@@ -277,9 +280,6 @@
         console.error("音声再生エラー", e);
       }
     }
-
-    setInterval(fetchOrders, 800);
-    window.onload = fetchOrders;
   </script>
 </body>
 </html>
