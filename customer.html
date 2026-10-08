@@ -4,95 +4,30 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ご注文状況 - お客様お呼出画面</title>
-  <!-- ★Firebaseを利用するための準備ファイル -->
   <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
   <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
 
   <style>
-    body {
-      font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
-      background-color: #f4f7f6;
-      margin: 0;
-      padding: 20px;
-      color: #333;
-    }
-    h1 {
-      text-align: center;
-      color: #2c3e50;
-      margin-bottom: 30px;
-      font-size: 2.5rem;
-    }
-    .container {
-      display: flex;
-      gap: 20px;
-      max-width: 1200px;
-      margin: 0 auto;
-    }
-    .column {
-      flex: 1;
-      background: #fff;
-      border-radius: 12px;
-      padding: 20px;
-      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-    }
-    .column h2 {
-      text-align: center;
-      padding-bottom: 10px;
-      border-bottom: 3px solid #eee;
-      margin-top: 0;
-      font-size: 1.8rem;
-    }
+    body { font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; color: #333; }
+    h1 { text-align: center; color: #2c3e50; margin-bottom: 30px; font-size: 2.5rem; }
+    .container { display: flex; gap: 20px; max-width: 1200px; margin: 0 auto; }
+    .column { flex: 1; background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+    .column h2 { text-align: center; padding-bottom: 10px; border-bottom: 3px solid #eee; margin-top: 0; font-size: 1.8rem; }
     .preparing-title { color: #e67e22; border-bottom-color: #e67e22 !important; }
     .ready-title { color: #27ae60; border-bottom-color: #27ae60 !important; }
     
-    .orders-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-      gap: 15px;
-      margin-top: 20px;
-    }
-    .card {
-      background: #fafafa;
-      border: 1px solid #ddd;
-      border-radius: 8px;
-      padding: 30px 15px; /* 番号だけになったので上下の余白を大きく */
-      text-align: center;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      animation: fadeIn 0.5s ease-in-out;
-      transition: background-color 0.3s, color 0.3s;
-    }
-    
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(-10px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
+    .orders-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 15px; margin-top: 20px; }
+    .card { background: #fafafa; border: 1px solid #ddd; border-radius: 8px; padding: 30px 15px; text-align: center; display: flex; flex-direction: column; justify-content: center; animation: fadeIn 0.5s ease-in-out; transition: background-color 0.3s, color 0.3s; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } }
+    .receipt-number { font-size: 3.5rem; font-weight: bold; color: #2c3e50; margin: 0; }
 
-    .receipt-number {
-      font-size: 3.5rem; /* 遠くからでも見えるように超特大に */
-      font-weight: bold;
-      color: #2c3e50;
-      margin: 0;
-    }
-
-    /* ★15秒間の点滅（フラッシュ）アニメーション */
-    .blink {
-      animation: flashWarning 1s infinite;
-    }
-    @keyframes flashWarning {
-      0%, 100% { background-color: #fafafa; }
-      50% { background-color: #f1c40f; } /* ピカッと黄色く光る */
-    }
-    .blink .receipt-number {
-      color: #d35400; /* 光っている間は文字色も赤茶色に */
-    }
+    .blink { animation: flashWarning 1s infinite; }
+    @keyframes flashWarning { 0%, 100% { background-color: #fafafa; } 50% { background-color: #f1c40f; } }
+    .blink .receipt-number { color: #d35400; }
   </style>
 </head>
 <body>
-
   <h1>ご注文の番号</h1>
-  
   <div class="container">
     <div class="column">
       <h2 class="preparing-title">調理中</h2>
@@ -105,150 +40,57 @@
   </div>
 
   <script>
-    // ==========================================
-    // ★Firebaseの接続設定
-    // ==========================================
-    const firebaseConfig = {
-      databaseURL: "https://order-system-6a1e2-default-rtdb.firebaseio.com/"
-    };
+    const firebaseConfig = { databaseURL: "https://order-system-6a1e2-default-rtdb.firebaseio.com/" };
     firebase.initializeApp(firebaseConfig);
     const db = firebase.database();
     const ordersRef = db.ref('orders');
 
     let isInitialLoad = true; 
-    let audioQueue = [];
-    let isPlayingAudio = false;
     let knownStatuses = {}; 
 
-    // Firebase側でデータが変わったら瞬時に画面を書き換える
     ordersRef.on('value', (snapshot) => {
       const data = snapshot.val();
       const orders = [];
-      
-      for (let key in data) {
-        orders.push(data[key]);
-      }
+      for (let key in data) orders.push(data[key]);
       orders.sort((a, b) => a.timestamp - b.timestamp);
-      
       renderOrders(orders);
     });
 
     function renderOrders(orders) {
       const preparingContainer = document.getElementById('preparing-container');
       const readyContainer = document.getElementById('ready-container');
-      
-      let hasNewOrder = false;
       const serverReceipts = orders.map(o => o.receiptNumber);
 
-      // 受渡完了になって消えたオーダーを画面から消す
       document.querySelectorAll('.card').forEach(card => {
         const rec = card.dataset.receipt;
         if (!serverReceipts.includes(rec)) {
-          card.remove();
-          delete knownStatuses[rec];
+          card.remove(); delete knownStatuses[rec];
         }
       });
 
-      // オーダーの追加と移動
       orders.forEach(order => {
         let card = document.querySelector(`.card[data-receipt="${order.receiptNumber}"]`);
         const prevStatus = knownStatuses[order.receiptNumber];
 
-        // 新規オーダーなら通知音フラグON
-        if (!isInitialLoad && !prevStatus && order.status === '調理中') {
-           hasNewOrder = true;
-        }
-
-        // カード生成（商品名リストを完全削除）
         if (!card) {
-          card = document.createElement('div');
-          card.className = 'card';
-          card.dataset.receipt = order.receiptNumber;
-          
-          card.innerHTML = `
-            <div class="receipt-number">${order.receiptNumber}</div>
-          `;
+          card = document.createElement('div'); card.className = 'card'; card.dataset.receipt = order.receiptNumber;
+          card.innerHTML = `<div class="receipt-number">${order.receiptNumber}</div>`;
         }
 
-        // 呼出中になった瞬間の処理（音声＋点滅）
+        // ★呼出中になったら点滅させるだけ（音声は鳴らさない）
         if (!isInitialLoad && order.status === '呼出中' && prevStatus !== '呼出中') {
-           enqueueVoice(order.receiptNumber);
-           
-           // ★点滅クラスを追加
            card.classList.add('blink');
-           // ★15秒後（15000ミリ秒後）に点滅クラスを削除
-           setTimeout(() => {
-             if (card) card.classList.remove('blink');
-           }, 15000);
+           setTimeout(() => { if (card) card.classList.remove('blink'); }, 15000);
         }
-        
         knownStatuses[order.receiptNumber] = order.status;
 
-        // 場所移動
         if (order.status === '調理中' && card.parentElement !== preparingContainer) {
           preparingContainer.appendChild(card);
         } else if (order.status === '呼出中' && card.parentElement !== readyContainer) {
           readyContainer.appendChild(card);
         }
       });
-
-      // 新規ポンッ音
-      if (hasNewOrder) {
-        const notifyAudio = new Audio('./audio/notify.mp3');
-        notifyAudio.play().catch(e => console.error("通知音再生エラー", e));
-      }
-      
       setTimeout(() => { isInitialLoad = false; }, 1000); 
-    }
-
-    // ==========================================
-    // 音声のキュー（順番待ち）再生機能
-    // ==========================================
-    function enqueueVoice(receiptNumber) {
-      audioQueue.push(receiptNumber);
-      if (!isPlayingAudio) {
-        processAudioQueue();
-      }
-    }
-
-    async function processAudioQueue() {
-      if (audioQueue.length === 0) {
-        isPlayingAudio = false;
-        return;
-      }
-      
-      isPlayingAudio = true;
-      const receiptNumber = audioQueue.shift();
-      
-      await playCustomVoice(receiptNumber);
-      
-      setTimeout(processAudioQueue, 1000);
-    }
-
-    async function playCustomVoice(receiptNumber) {
-      const playAudio = (fileName) => {
-        return new Promise((resolve) => {
-          const audio = new Audio('./audio/' + fileName);
-          audio.onended = resolve;
-          audio.onerror = resolve;
-          audio.play().catch(resolve);
-        });
-      };
-
-      try {
-        await playAudio('prefix.mp3');
-        for (let i = 0; i < receiptNumber.length; i++) {
-          const char = receiptNumber[i];
-          if (/[0-9]/.test(char)) {
-            await playAudio(char + '.mp3');
-          } else if (char === '-') {
-            await playAudio('hyphen.mp3');
-          }
-        }
-        await playAudio('suffix.mp3');
-      } catch (e) {
-        console.error("音声再生エラー", e);
-      }
     }
   </script>
 </body>
