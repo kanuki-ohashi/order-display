@@ -5,8 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>ご注文状況の確認</title>
   
-  <!-- ★Firebaseの重い通信プログラム（SDK）を丸ごと削除しました！ -->
-
   <style>
     body {
       font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
@@ -32,6 +30,7 @@
       width: 90%; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
     button:active { background-color: #2980b9; transform: translateY(2px); }
+    button:disabled { background-color: #95a5a6; cursor: not-allowed; }
     
     .result-box {
       background: #fff; border-radius: 12px; padding: 30px 20px;
@@ -58,65 +57,106 @@
   </div>
 
   <div class="result-box" id="result-box">
-    <div style="font-size: 1.2rem; color: #7f8c8d; font-weight: bold;">番号: <span id="result-number"></span></div>
+    <div style="font-size: 1.2rem; color: #7f8c8d; font-weight: bold;">検索番号: <span id="result-number"></span></div>
     <div class="status-text" id="result-status"></div>
   </div>
 
   <script>
-    // ★通信用のURL（お客様の通信はこれだけ使います）
     const FIREBASE_URL = "https://order-system-6a1e2-default-rtdb.firebaseio.com";
 
     async function checkStatus() {
-      let inputNum = document.getElementById('receipt-input').value.trim();
-      if (!inputNum) return;
+      let rawInput = document.getElementById('receipt-input').value.trim();
+      if (!rawInput) return;
 
       const resultBox = document.getElementById('result-box');
       const resultNumber = document.getElementById('result-number');
       const resultStatus = document.getElementById('result-status');
       const checkBtn = document.getElementById('check-btn');
 
-      // 入力文字のクリーニング
-      inputNum = inputNum.replace(/[#＃\s]/g, '');
-      inputNum = inputNum.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
-      inputNum = inputNum.replace(/[ー－]/g, '-');
+      // ①【おもてなし変換】全角数字を半角にする
+      let inputNum = rawInput.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
+      // ②【おもてなし変換】数字とハイフン以外（空白や#など）を全削除
+      inputNum = inputNum.replace(/[^0-9-ー]/g, '').replace(/[ー]/g, '-');
 
       resultBox.style.display = 'block';
-      resultNumber.innerText = inputNum;
+      resultNumber.innerText = rawInput; 
       resultStatus.innerText = "確認中...";
       resultStatus.className = "status-text";
-      checkBtn.disabled = true; // 連打防止
+      checkBtn.disabled = true;
 
-      try {
-        // ★その瞬間だけピンポイントでデータを取りに行く（繋がりっぱなしにならない）
-        
-        // 1. Orders（進行中）を確認
-        let res = await fetch(`${FIREBASE_URL}/orders/${inputNum}.json`);
-        let data = await res.json();
+      // ③【表記ゆれ吸収】検索する「候補」を自動で複数パターン作る
+      let candidates = new Set();
+      if (inputNum) {
+        // ハイフン無しで打たれた場合（例: 1234 -> 1-234 と推測）
+        if (!inputNum.includes('-')) {
+          if (inputNum.length === 4) inputNum = inputNum[0] + '-' + inputNum.substring(1);
+          else if (inputNum.length === 5) inputNum = inputNum.substring(0,2) + '-' + inputNum.substring(2);
+          else if (inputNum.length === 6) inputNum = inputNum.substring(0,2) + '-' + inputNum.substring(2);
+        }
 
-        if (data) {
-          resultStatus.innerText = data.status;
-          if (data.status === '調理中') resultStatus.classList.add('status-preparing');
-          else if (data.status === '呼出中') resultStatus.classList.add('status-ready');
-        } else {
-          // 2. Archive（受渡済み履歴）を確認
-          res = await fetch(`${FIREBASE_URL}/archive/${inputNum}.json`);
-          data = await res.json();
+        if (inputNum.includes('-')) {
+          let p = inputNum.split('-');
+          let p1 = p[0], p2 = p[1];
           
-          if (data) {
+          // レシート通り「12-3456」と打たれた場合、DBの「12-456」に合わせて下3桁に自動カット
+          if (p2.length > 3) p2 = p2.slice(-3); 
+          
+          candidates.add(`${p1}-${p2}`);
+          // 「1」⇔「01」の違いも両方探すようにする
+          if (p1.length === 1) candidates.add(`0${p1}-${p2}`);
+          else if (p1.length === 2 && p1.startsWith('0')) candidates.add(`${p1.substring(1)}-${p2}`);
+        } else {
+          candidates.add(inputNum); // それでも謎の番号ならそのまま探す
+        }
+      }
+
+      let candidateArray = Array.from(candidates);
+      
+      try {
+        let foundData = null;
+        let isArchive = false;
+
+        // 【検索開始】作られた複数の候補を「同時並行」で一気にFirebaseへ探しに行く
+        
+        // 1. Orders（進行中）を探す
+        let orderPromises = candidateArray.map(key => fetch(`${FIREBASE_URL}/orders/${key}.json`).then(r => r.json()));
+        let orderResults = await Promise.all(orderPromises);
+        for (let data of orderResults) {
+          if (data) { foundData = data; break; }
+        }
+
+        // 2. 進行中に無ければ Archive（受渡済み履歴）を探す
+        if (!foundData) {
+          let archivePromises = candidateArray.map(key => fetch(`${FIREBASE_URL}/archive/${key}.json`).then(r => r.json()));
+          let archiveResults = await Promise.all(archivePromises);
+          for (let data of archiveResults) {
+            if (data) { foundData = data; isArchive = true; break; }
+          }
+        }
+
+        // 【結果表示】
+        if (foundData) {
+          // 見つかったら、DB上の「正しい表記」に直して表示してあげる
+          resultNumber.innerText = foundData.receiptNumber; 
+          
+          if (isArchive) {
             resultStatus.innerText = "お受渡済みです";
             resultStatus.classList.add('status-done');
           } else {
-            // 3. どちらにも無い
-            resultStatus.innerText = "番号が見つかりません\n(入力間違いか、未送信です)";
-            resultStatus.classList.add('status-error');
+            resultStatus.innerText = foundData.status;
+            if (foundData.status === '調理中') resultStatus.classList.add('status-preparing');
+            else if (foundData.status === '呼出中') resultStatus.classList.add('status-ready');
           }
+        } else {
+          resultStatus.innerText = "番号が見つかりません\n(入力間違いか、未送信です)";
+          resultStatus.classList.add('status-error');
         }
       } catch (e) {
         console.error(e);
         resultStatus.innerText = "通信エラーが発生しました";
         resultStatus.classList.add('status-error');
       } finally {
-        checkBtn.disabled = false; // ボタン復活
+        checkBtn.disabled = false;
       }
     }
   </script>
