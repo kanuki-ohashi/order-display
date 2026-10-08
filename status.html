@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>ご注文状況の確認</title>
+  
+  <!-- ★Firebaseの重い通信プログラム（SDK）を丸ごと削除しました！ -->
+
+  <style>
+    body {
+      font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
+      background-color: #f4f7f6;
+      margin: 0;
+      padding: 20px;
+      color: #333;
+      text-align: center;
+    }
+    h1 { color: #2c3e50; font-size: 1.5rem; margin-top: 20px; margin-bottom: 30px; }
+    .search-box {
+      background: #fff; border-radius: 12px; padding: 25px 20px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 0 auto 20px;
+    }
+    input[type="text"] {
+      width: 90%; padding: 15px; font-size: 1.5rem; border: 2px solid #ddd;
+      border-radius: 8px; margin-bottom: 15px; text-align: center; box-sizing: border-box;
+    }
+    input[type="text"]:focus { outline: none; border-color: #3498db; }
+    button {
+      background-color: #3498db; color: #fff; border: none; padding: 15px 30px;
+      font-size: 1.2rem; font-weight: bold; border-radius: 8px; cursor: pointer;
+      width: 90%; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    button:active { background-color: #2980b9; transform: translateY(2px); }
+    
+    .result-box {
+      background: #fff; border-radius: 12px; padding: 30px 20px;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1); max-width: 400px; margin: 0 auto;
+      display: none; 
+    }
+    .status-text { font-size: 2.2rem; font-weight: bold; margin-top: 15px; }
+    
+    .status-preparing { color: #e67e22; }
+    .status-ready { color: #27ae60; }
+    .status-done { color: #7f8c8d; font-size: 1.8rem; }
+    .status-error { color: #e74c3c; font-size: 1.2rem; }
+  </style>
+</head>
+<body>
+
+  <h1>ご注文状況の確認</h1>
+  
+  <div class="search-box">
+    <p style="margin-top: 0; color: #7f8c8d; font-weight: bold;">レシート番号を入力してください<br><small style="font-weight: normal;">（例：12-456）</small></p>
+    <input type="text" id="receipt-input" placeholder="00-000">
+    <br>
+    <button onclick="checkStatus()" id="check-btn">状況を確認する</button>
+  </div>
+
+  <div class="result-box" id="result-box">
+    <div style="font-size: 1.2rem; color: #7f8c8d; font-weight: bold;">番号: <span id="result-number"></span></div>
+    <div class="status-text" id="result-status"></div>
+  </div>
+
+  <script>
+    // ★通信用のURL（お客様の通信はこれだけ使います）
+    const FIREBASE_URL = "https://order-system-6a1e2-default-rtdb.firebaseio.com";
+
+    async function checkStatus() {
+      let inputNum = document.getElementById('receipt-input').value.trim();
+      if (!inputNum) return;
+
+      const resultBox = document.getElementById('result-box');
+      const resultNumber = document.getElementById('result-number');
+      const resultStatus = document.getElementById('result-status');
+      const checkBtn = document.getElementById('check-btn');
+
+      // 入力文字のクリーニング
+      inputNum = inputNum.replace(/[#＃\s]/g, '');
+      inputNum = inputNum.replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0));
+      inputNum = inputNum.replace(/[ー－]/g, '-');
+
+      resultBox.style.display = 'block';
+      resultNumber.innerText = inputNum;
+      resultStatus.innerText = "確認中...";
+      resultStatus.className = "status-text";
+      checkBtn.disabled = true; // 連打防止
+
+      try {
+        // ★その瞬間だけピンポイントでデータを取りに行く（繋がりっぱなしにならない）
+        
+        // 1. Orders（進行中）を確認
+        let res = await fetch(`${FIREBASE_URL}/orders/${inputNum}.json`);
+        let data = await res.json();
+
+        if (data) {
+          resultStatus.innerText = data.status;
+          if (data.status === '調理中') resultStatus.classList.add('status-preparing');
+          else if (data.status === '呼出中') resultStatus.classList.add('status-ready');
+        } else {
+          // 2. Archive（受渡済み履歴）を確認
+          res = await fetch(`${FIREBASE_URL}/archive/${inputNum}.json`);
+          data = await res.json();
+          
+          if (data) {
+            resultStatus.innerText = "お受渡済みです";
+            resultStatus.classList.add('status-done');
+          } else {
+            // 3. どちらにも無い
+            resultStatus.innerText = "番号が見つかりません\n(入力間違いか、未送信です)";
+            resultStatus.classList.add('status-error');
+          }
+        }
+      } catch (e) {
+        console.error(e);
+        resultStatus.innerText = "通信エラーが発生しました";
+        resultStatus.classList.add('status-error');
+      } finally {
+        checkBtn.disabled = false; // ボタン復活
+      }
+    }
+  </script>
+</body>
+</html>
