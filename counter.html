@@ -13,7 +13,6 @@
     .container { display: flex; gap: 20px; max-width: 1400px; margin: 0 auto; }
     .column { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
     
-    /* ★受渡口用レイアウト（左3割：右7割） */
     .col-sub { flex: 3; }
     .col-main { flex: 7; }
 
@@ -31,14 +30,12 @@
   </style>
 </head>
 <body>
-  <h1>受渡口専用画面（受渡メイン）</h1>
+  <h1>受渡口専用画面（音声出力メイン）</h1>
   <div class="container">
-    <!-- 左：小さく表示 -->
     <div class="column col-sub">
       <h2 class="preparing-title">調理中</h2>
       <div id="preparing-container" class="orders-grid"></div>
     </div>
-    <!-- 右：大きく表示 -->
     <div class="column col-main">
       <h2 class="ready-title">呼出中（受渡待ち）</h2>
       <div id="ready-container" class="orders-grid"></div>
@@ -51,6 +48,57 @@
     const db = firebase.database();
     const ordersRef = db.ref('orders');
     const archiveRef = db.ref('archive');
+
+    let isInitialLoad = true;
+    let knownStatuses = {};
+
+    // ==========================================
+    // ★音声の「おまとめ」機能をこちらに移動
+    // ==========================================
+    let audioQueue = [];
+    let isPlayingAudio = false;
+    let batchTimer = null;
+
+    function enqueueVoice(receiptNumber) {
+      audioQueue.push(receiptNumber);
+      if (isPlayingAudio) return;
+      if (batchTimer) clearTimeout(batchTimer);
+      batchTimer = setTimeout(() => {
+        processAudioQueue();
+      }, 2000);
+    }
+
+    async function processAudioQueue() {
+      if (audioQueue.length === 0) { isPlayingAudio = false; return; }
+      isPlayingAudio = true;
+      const batch = [...audioQueue];
+      audioQueue = []; 
+      await playCustomVoiceBatch(batch);
+      setTimeout(processAudioQueue, 1000);
+    }
+
+    async function playCustomVoiceBatch(receiptNumbers) {
+      const playAudio = (fileName) => {
+        return new Promise((resolve) => {
+          const audio = new Audio('./audio/' + fileName);
+          audio.onended = resolve; audio.onerror = resolve; audio.play().catch(resolve);
+        });
+      };
+      try {
+        await playAudio('prefix.mp3'); 
+        for (let j = 0; j < receiptNumbers.length; j++) {
+          const recNum = receiptNumbers[j];
+          for (let i = 0; i < recNum.length; i++) {
+            const char = recNum[i];
+            if (/[0-9]/.test(char)) await playAudio(char + '.mp3');
+            else if (char === '-') await playAudio('hyphen.mp3');
+          }
+          await playAudio('ban.mp3'); // ★オンにしてあります
+          if (j < receiptNumbers.length - 1) await new Promise(res => setTimeout(res, 800));
+        }
+        await playAudio('suffix.mp3');
+      } catch (e) { console.error("音声再生エラー", e); }
+    }
 
     ordersRef.on('value', (snapshot) => {
       const data = snapshot.val();
@@ -83,16 +131,18 @@
       const serverReceipts = orders.map(o => o.receiptNumber);
 
       document.querySelectorAll('.card').forEach(card => {
-        if (!serverReceipts.includes(card.dataset.receipt)) card.remove();
+        const rec = card.dataset.receipt;
+        if (!serverReceipts.includes(rec)) {
+          card.remove(); delete knownStatuses[rec];
+        }
       });
 
       orders.forEach(order => {
         let card = document.querySelector(`.card[data-receipt="${order.receiptNumber}"]`);
+        const prevStatus = knownStatuses[order.receiptNumber];
         
         if (!card) {
-          card = document.createElement('div');
-          card.className = 'card';
-          card.dataset.receipt = order.receiptNumber;
+          card = document.createElement('div'); card.className = 'card'; card.dataset.receipt = order.receiptNumber;
           const itemsHtml = order.items ? order.items.replace(/\n/g, '<br>') : 'なし';
           card.innerHTML = `<div class="receipt-number">${order.receiptNumber}</div><div class="items-list">${itemsHtml}</div>`;
 
@@ -100,14 +150,12 @@
             const btn = document.createElement('button');
             btn.className = 'btn btn-ready'; btn.innerText = '準備完了';
             btn.onclick = () => updateStatus(order.receiptNumber, '呼出中', btn);
-            card.appendChild(btn);
-            preparingContainer.appendChild(card);
+            card.appendChild(btn); preparingContainer.appendChild(card);
           } else if (order.status === '呼出中') {
             const btn = document.createElement('button');
             btn.className = 'btn btn-done'; btn.innerText = '受渡';
             btn.onclick = () => updateStatus(order.receiptNumber, '受渡完了', btn);
-            card.appendChild(btn);
-            readyContainer.appendChild(card);
+            card.appendChild(btn); readyContainer.appendChild(card);
           }
         } else {
           if (order.status === '呼出中' && card.parentElement === preparingContainer) {
@@ -117,8 +165,15 @@
             btn.onclick = () => updateStatus(order.receiptNumber, '受渡完了', btn);
           }
         }
+
+        // ★呼出中になったら音声キューに追加（受渡口タブレットが喋る）
+        if (!isInitialLoad && order.status === '呼出中' && prevStatus !== '呼出中') {
+           enqueueVoice(order.receiptNumber);
+        }
+        knownStatuses[order.receiptNumber] = order.status;
       });
-      // ★受渡口画面は音を一切鳴らさない
+      
+      setTimeout(() => { isInitialLoad = false; }, 1000);
     }
   </script>
 </body>
