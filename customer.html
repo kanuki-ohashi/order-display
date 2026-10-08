@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ご注文状況 - お客様お呼出画面</title>
+  <!-- ★Firebaseを利用するための準備ファイル -->
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+
   <style>
     body {
       font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
@@ -16,7 +20,7 @@
       text-align: center;
       color: #2c3e50;
       margin-bottom: 30px;
-      font-size: 2.5rem; /* お客様から見えやすいように少し大きく */
+      font-size: 2.5rem;
     }
     .container {
       display: flex;
@@ -51,43 +55,43 @@
       background: #fafafa;
       border: 1px solid #ddd;
       border-radius: 8px;
-      padding: 15px;
+      padding: 30px 15px; /* 番号だけになったので上下の余白を大きく */
       text-align: center;
       display: flex;
       flex-direction: column;
       justify-content: center;
       animation: fadeIn 0.5s ease-in-out;
+      transition: background-color 0.3s, color 0.3s;
     }
     
-    /* ふわっと表示されるアニメーション */
     @keyframes fadeIn {
       from { opacity: 0; transform: translateY(-10px); }
       to { opacity: 1; transform: translateY(0); }
     }
 
     .receipt-number {
-      font-size: 2.2rem; /* 番号をさらに強調 */
+      font-size: 3.5rem; /* 遠くからでも見えるように超特大に */
       font-weight: bold;
       color: #2c3e50;
-      margin-bottom: 10px;
+      margin: 0;
     }
-    .items-list {
-      font-size: 1.3rem;
-      font-weight: bold;
-      color: #222;
-      text-align: left;
-      background: #fff;
-      padding: 12px;
-      border-radius: 4px;
-      border: 1px dashed #ccc;
-      min-height: 40px;
-      line-height: 1.5;
+
+    /* ★15秒間の点滅（フラッシュ）アニメーション */
+    .blink {
+      animation: flashWarning 1s infinite;
+    }
+    @keyframes flashWarning {
+      0%, 100% { background-color: #fafafa; }
+      50% { background-color: #f1c40f; } /* ピカッと黄色く光る */
+    }
+    .blink .receipt-number {
+      color: #d35400; /* 光っている間は文字色も赤茶色に */
     }
   </style>
 </head>
 <body>
 
-  <h1>ご注文の状況</h1>
+  <h1>ご注文の番号</h1>
   
   <div class="container">
     <div class="column">
@@ -102,20 +106,32 @@
 
   <script>
     // ==========================================
-    // ★ここを最新のGASウェブアプリURLに書き換えてください★
+    // ★Firebaseの接続設定
     // ==========================================
-    const GAS_URL = 'https://script.google.com/macros/s/AKfycbwiPE1wSVaTV767nz1r31h3qNUiJWKwn8e53VtK5UH3lIuxm2FH30LyW4sObaFT4oQ0OQ/exec';
+    const firebaseConfig = {
+      databaseURL: "https://order-system-6a1e2-default-rtdb.firebaseio.com/"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+    const ordersRef = db.ref('orders');
 
     let isInitialLoad = true; 
     let audioQueue = [];
     let isPlayingAudio = false;
-    let knownStatuses = {}; // 各レシート番号の現在のステータスを記憶する用
+    let knownStatuses = {}; 
 
-    function fetchOrders() {
-      const script = document.createElement('script');
-      script.src = `${GAS_URL}?callback=renderOrders&t=${new Date().getTime()}`;
-      document.body.appendChild(script);
-    }
+    // Firebase側でデータが変わったら瞬時に画面を書き換える
+    ordersRef.on('value', (snapshot) => {
+      const data = snapshot.val();
+      const orders = [];
+      
+      for (let key in data) {
+        orders.push(data[key]);
+      }
+      orders.sort((a, b) => a.timestamp - b.timestamp);
+      
+      renderOrders(orders);
+    });
 
     function renderOrders(orders) {
       const preparingContainer = document.getElementById('preparing-container');
@@ -124,7 +140,7 @@
       let hasNewOrder = false;
       const serverReceipts = orders.map(o => o.receiptNumber);
 
-      // 1. 受渡完了になってサーバーから消えたオーダーを画面から消す
+      // 受渡完了になって消えたオーダーを画面から消す
       document.querySelectorAll('.card').forEach(card => {
         const rec = card.dataset.receipt;
         if (!serverReceipts.includes(rec)) {
@@ -133,39 +149,42 @@
         }
       });
 
-      // 2. オーダーの追加と移動
+      // オーダーの追加と移動
       orders.forEach(order => {
         let card = document.querySelector(`.card[data-receipt="${order.receiptNumber}"]`);
         const prevStatus = knownStatuses[order.receiptNumber];
 
-        // ★新機能：スタッフ側で「呼出中」に変わったことを検知したら音声をキューに入れる
-        if (!isInitialLoad && order.status === '呼出中' && prevStatus !== '呼出中') {
-           enqueueVoice(order.receiptNumber);
-        }
-        
-        // ★新規オーダー検知（通知音用）
+        // 新規オーダーなら通知音フラグON
         if (!isInitialLoad && !prevStatus && order.status === '調理中') {
            hasNewOrder = true;
         }
 
-        // ステータスを記憶の更新
-        knownStatuses[order.receiptNumber] = order.status;
-
-        // カードがまだ無ければ作る（ボタン無しバージョン）
+        // カード生成（商品名リストを完全削除）
         if (!card) {
           card = document.createElement('div');
           card.className = 'card';
           card.dataset.receipt = order.receiptNumber;
           
-          const itemsHtml = order.items ? order.items.replace(/\n/g, '<br>') : '商品情報なし';
-
           card.innerHTML = `
             <div class="receipt-number">${order.receiptNumber}</div>
-            <div class="items-list">${itemsHtml}</div>
           `;
         }
 
-        // ステータスに応じた場所へ移動（または追加）
+        // 呼出中になった瞬間の処理（音声＋点滅）
+        if (!isInitialLoad && order.status === '呼出中' && prevStatus !== '呼出中') {
+           enqueueVoice(order.receiptNumber);
+           
+           // ★点滅クラスを追加
+           card.classList.add('blink');
+           // ★15秒後（15000ミリ秒後）に点滅クラスを削除
+           setTimeout(() => {
+             if (card) card.classList.remove('blink');
+           }, 15000);
+        }
+        
+        knownStatuses[order.receiptNumber] = order.status;
+
+        // 場所移動
         if (order.status === '調理中' && card.parentElement !== preparingContainer) {
           preparingContainer.appendChild(card);
         } else if (order.status === '呼出中' && card.parentElement !== readyContainer) {
@@ -173,13 +192,13 @@
         }
       });
 
-      // 新規オーダーの通知音（ポンッ）
+      // 新規ポンッ音
       if (hasNewOrder) {
         const notifyAudio = new Audio('./audio/notify.mp3');
         notifyAudio.play().catch(e => console.error("通知音再生エラー", e));
       }
       
-      isInitialLoad = false; 
+      setTimeout(() => { isInitialLoad = false; }, 1000); 
     }
 
     // ==========================================
@@ -203,7 +222,7 @@
       
       await playCustomVoice(receiptNumber);
       
-      setTimeout(processAudioQueue, 1000); // 1秒あけて次へ
+      setTimeout(processAudioQueue, 1000);
     }
 
     async function playCustomVoice(receiptNumber) {
@@ -231,10 +250,6 @@
         console.error("音声再生エラー", e);
       }
     }
-
-    // お客様向け画面も800ミリ秒ごとに確認
-    setInterval(fetchOrders, 800);
-    window.onload = fetchOrders;
   </script>
 </body>
 </html>
